@@ -13,7 +13,7 @@ import pandas as pd
 import numpy as np
 import datetime
 import time
-import chardet
+# import chardet
 
 # 设置页面配置
 st.set_page_config(layout="wide")
@@ -25,14 +25,14 @@ st.set_page_config(layout="wide")
 #     return result['encoding']
 
 # 检测文件编码 - 修改为直接处理文件对象
-def detect_encoding(file_object):
-    """检测文件对象的编码"""
-    # 读取前10KB来检测编码
-    raw_data = file_object.read(10240)
-    # 重置文件指针，以便后续读取
-    file_object.seek(0)
-    result = chardet.detect(raw_data)
-    return result['encoding']
+# def detect_encoding(file_object):
+#     """检测文件对象的编码"""
+#     # 读取前10KB来检测编码
+#     raw_data = file_object.read(10240)
+#     # 重置文件指针，以便后续读取
+#     file_object.seek(0)
+#     result = chardet.detect(raw_data)
+#     return result['encoding']
 
 def reset_state():
     st.session_state.gm_pms_df = None
