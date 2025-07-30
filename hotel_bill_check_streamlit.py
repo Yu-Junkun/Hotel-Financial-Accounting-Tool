@@ -81,6 +81,86 @@ def yn_process_pms_data_for_ota(pms_df):
     pms_df = pms_df[pms_df['核对单号'] != '']
     return pms_df
 
+def lz_process_pms_data_for_ota(pms_df, convert_df):
+    # 确保日期列是datetime类型
+    pms_df['入住时间'] = pd.to_datetime(pms_df['入住时间'])
+    pms_df['退房时间'] = pd.to_datetime(pms_df['退房时间'])
+    pms_df['单号'] = pms_df['单号'].fillna('').astype(str)
+    # convert_df['单号'] = convert_df['单号'].fillna('').astype(str)
+    # convert_df['OTA单号'] = convert_df['OTA单号'].fillna('').astype(str)
+    # 按单号分组，同时聚合消费总和、最早入住时间和最晚退房时间
+    pms_grouped = pms_df.groupby('单号').agg({
+        '消费': 'sum',
+        '入住时间': 'min',  # 最早入住时间
+        '退房时间': 'max'   # 最晚退房时间
+    }).reset_index()
+    
+    # 重命名列
+    pms_grouped.rename(columns={
+        '消费': 'PMS同单号消费总和',
+        '入住时间': '最早入住时间',
+        '退房时间': '最晚退房时间'
+    }, inplace=True)
+    
+    # 合并数据
+    pms_comverted_df = pd.merge(
+        pms_grouped[['单号', 'PMS同单号消费总和', '最早入住时间', '最晚退房时间']],
+        convert_df[['单号', 'OTA单号']],
+        on='单号',  # 左右列名相同时可以简化
+        how='left'
+    )
+    
+    return pms_comverted_df
+
+def lz_process_ota_data(ota_df):
+    # ota_df['订单号'] = ota_df['订单号'].fillna('').astype(str)
+    ota_df = ota_df.groupby('订单号')['结算价'].sum().reset_index()
+    ota_df.rename(columns={'结算价': 'OTA同订单号结算价总和'}, inplace=True)
+    return ota_df
+
+def lz_compare_data(pms_df, ota_df):
+    """比对PMS和POS数据，计算差异"""
+    # 检查输入DataFrame是否有效
+    ota_df['订单号'] = ota_df['订单号'].fillna('').astype(str)
+    if pms_df.empty or ota_df.empty:
+        st.error("无法比对数据：PMS或OTA数据为空")
+        return pd.DataFrame()
+    
+    # 检查必要的列是否存在
+    if 'PMS同单号消费总和' not in pms_df.columns:
+        st.error("PMS数据缺少'PMS同单号消费总和'列")
+        return pd.DataFrame()
+    
+    if 'OTA同订单号结算价总和' not in ota_df.columns:
+        st.error("OTA数据缺少'OTA同订单号结算价总和'列")
+        return pd.DataFrame()
+    
+    # 合并数据
+    compare_result = pd.merge(
+        pms_df[['单号', 'OTA单号', 'PMS同单号消费总和', '最早入住时间', '最晚退房时间']],
+        ota_df[['订单号', 'OTA同订单号结算价总和']],
+        left_on='OTA单号',
+        right_on='订单号',
+        how='left' 
+    )
+    
+    # 填充缺失值
+    compare_result['OTA同订单号结算价总和'] = compare_result['OTA同订单号结算价总和'].fillna(0)
+    
+    # 计算差异
+    compare_result['PMS同单号消费总和'] = compare_result['PMS同单号消费总和'].round(2)
+    compare_result['OTA同订单号结算价总和'] = compare_result['OTA同订单号结算价总和'].round(2)
+    compare_result['差异'] = compare_result['PMS同单号消费总和'] - compare_result['OTA同订单号结算价总和']
+    compare_result['差异'] = compare_result['差异'].round(2)
+    
+    # 更改日期格式为%Y/%d/%m %H:%M:%S 入住时间和退房时间
+    compare_result['最早入住时间'] = compare_result['最早入住时间'].dt.strftime('%Y/%m/%d %H:%M:%S')
+    compare_result['最晚退房时间'] = compare_result['最晚退房时间'].dt.strftime('%Y/%m/%d %H:%M:%S')
+    compare_result = compare_result[['单号', 'OTA单号', '订单号', '最早入住时间', '最晚退房时间', 'PMS同单号消费总和', 'OTA同订单号结算价总和', '差异']]
+    compare_result.rename(columns={'单号': 'PMS_内部单号', 'OTA单号': 'PMS_OTA单号', '订单号': 'OTA单号'}, inplace=True)
+    
+    return compare_result
+
 def gm_yn_process_pos_data(pos_df):
     """处理POS数据，计算核算日期和每日总和"""
     # 检查必要的列是否存在
@@ -505,10 +585,10 @@ def yn_hotel_pms_ota_check():
         if yn_upload_files_ota:  # 当有文件上传时
             dfs = []  # 存储所有工作表的数据
             error_messages = []  # 存储错误信息
-            
+            st.write(f"正在处理 {len(yn_upload_files_ota)} 个文件")
             for file in yn_upload_files_ota:
                 file_name = file.name
-                st.write(f"正在处理文件：{file_name}")
+                
                 
                 try:
                     # 1. 用ExcelFile打开文件（高效读取多工作表）
@@ -535,9 +615,9 @@ def yn_hotel_pms_ota_check():
                                 df_sheet = df_sheet.reset_index(drop=True)  # 重置索引
                                 df_sheet = df_sheet[['订单号', '分成金额']]
                                 dfs.append(df_sheet)
-                        st.success(f"成功读取 {file_name} 的 '{sheet}' 工作表（{len(df_sheet)}行数据）")
                 except Exception as e:
                     error_messages.append(f"处理文件 {file_name} 时出错：{str(e)}")
+            st.success(f"已成功处理 {len(yn_upload_files_ota)} 个文件")
             
             # 3. 显示错误信息（如果有）
             if error_messages:
@@ -870,10 +950,162 @@ def lz_hotel_pms_pos_check():
                         file_name=st.session_state.lz_file_name,
                         mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
                     )        
+
+def lz_hotel_pms_ota_check():
+    st.write('雅南酒店PMS与OTA对账系统')
+    
+    # 初始化会话状态
+    if 'lz_pms_df' not in st.session_state:
+        st.session_state.lz_pms_df = None
+    if 'lz_ota_df' not in st.session_state:
+        st.session_state.lz_ota_df = None
+    
+    if 'lz_compare_result' not in st.session_state:
+        st.session_state.lz_compare_result = None
+    if 'lz_file_saved' not in st.session_state:
+        st.session_state.lz_file_saved = False
+    if 'lz_file_name' not in st.session_state:
+        st.session_state.lz_file_name = None
+    
+    # 文件上传
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        lz_upload_file_pms = st.file_uploader("上传PMS文件，请注意将xls文档另存为xlsx", type=["xlsx"], key='lz_pms_ota')
+        if lz_upload_file_pms is not None:
+            st.session_state.lz_pms_df = pd.read_excel(lz_upload_file_pms, header=3)
+            st.success('PMS文件已成功加载')
+            st.write('PMS文件前3行预览:')
+            st.dataframe(st.session_state.lz_pms_df.head(3))
+    
+    with col2:
+        lz_upload_files_ota = st.file_uploader(
+            label="上传ota文件",
+            type=["xls"],
+            accept_multiple_files=True  # 允许多文件上传
+        )
+        
+        if lz_upload_files_ota:  # 当有文件上传时
+            dfs = []  # 存储所有工作表的数据
+            error_messages = []  # 存储错误信息
+            st.write(f"正在处理 {len(lz_upload_files_ota)} 个文件")
+            for file in lz_upload_files_ota:
+                file_name = file.name
+                try:
+                    # 1. 用ExcelFile打开文件（高效读取多工作表）
+                    excel_file = pd.ExcelFile(file, engine='xlrd')  # .xlsx需用openpyxl引擎，xls需用xlrd引擎
+                    all_sheets = excel_file.sheet_names  # 获取所有工作表名称
                     
+                    # 2. 检查并读取"预付订单明细"工作表
+                    for sheet in ['预付订单明细']:
+                        if sheet not in all_sheets:
+                            error_messages.append(f"文件 {file_name} 中不存在 '{sheet}' 工作表，已跳过该表")
+                            continue
+                        df_sheet = pd.read_excel(excel_file, sheet_name=sheet, dtype={'订单号': str}, header=1)
+                        if not df_sheet.empty:
+                            df_sheet = df_sheet.reset_index(drop=True)  # 重置索引
+                            df_sheet = df_sheet[['订单号', '结算价']]
+                            dfs.append(df_sheet)
+                        
+                except Exception as e:
+                    error_messages.append(f"处理文件 {file_name} 时出错：{str(e)}")
+            st.success(f"已成功处理 {len(lz_upload_files_ota)} 个文件")
+            # 3. 显示错误信息（如果有）
+            if error_messages:
+                st.error("处理过程中出现以下问题：")
+                for msg in error_messages:
+                    st.error(f"- {msg}")
+            # 4. 合并数据并存储
+            if dfs:  # 只有当有有效数据时才合并
+                combined_df = pd.concat(dfs, ignore_index=True)  # 合并所有工作表数据
+                st.session_state.lz_ota_df = combined_df  # 直接赋值DataFrame（无需再用read_excel）
+                
+                st.success(f"所有文件处理完成，共合并 {len(combined_df)} 行数据")
+                st.subheader("合并后的数据预览（前3行）")
+                st.dataframe(combined_df.head(3), use_container_width=True)
+            else:
+                st.warning("未读取到任何有效数据，请检查文件内容")
+        with col3:
+            lz_order_convert_file = st.file_uploader("上传历史房单转换文件", type=["xlsx"])
+            if lz_order_convert_file is not None:
+                # 读取历史房单转换文件
+                lz_order_convert_df = pd.read_excel(lz_order_convert_file, header=3)
+                st.session_state.lz_order_convert_df = lz_order_convert_df
+                st.success('历史房单文件已成功加载')
+                st.write('历史房单文件前3行预览:')
+                st.dataframe(st.session_state.lz_order_convert_df.head(3))
+                
+    # 对账按钮'同单号消费总和'
+    if st.button('开始对账'):
+        # 检查文件是否都已上传
+        if st.session_state.lz_pms_df is None or st.session_state.lz_ota_df is None:
+            st.error('请上传PMS和ota文件')
+            return
+        
+        # 数据处理
+        with st.spinner('正在处理数据...'):  
+            # 处理PMS数据
+            processed_pms = lz_process_pms_data_for_ota(st.session_state.lz_pms_df, st.session_state.lz_order_convert_df)
+            
+            # 处理ota数据
+            processed_ota = lz_process_ota_data(st.session_state.lz_ota_df)
+            
+            # 比对数据
+            st.session_state.lz_compare_result = lz_compare_data(processed_pms, processed_ota)
+            
+            # 重置保存状态
+            st.session_state.lz_file_saved = False
+            
+            st.success('对账完成！')
+    
+    # 显示对账结果（如果有）
+    if st.session_state.lz_compare_result is not None:
+        st.subheader('对账结果')
+        
+        # 结果表格 compare_result.rename(columns={'单号': 'PMS_内部单号', 'OTA单号': 'PMS_OTA单号', '订单号': 'OTA单号'}, inplace=True)
+        st.dataframe(
+            st.session_state.lz_compare_result[['PMS_内部单号', 'PMS_OTA单号', 'OTA单号', '最早入住时间', '最晚退房时间', 'PMS同单号消费总和', 'OTA同订单号结算价总和', '差异']],
+            use_container_width=True
+        )
+        
+        # 差异分析
+        total_orders = len(st.session_state.lz_compare_result)
+        matched_orders = len(st.session_state.lz_compare_result[st.session_state.lz_compare_result['差异'] == 0])
+        unmatched_orders = total_orders - matched_orders
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("总比对订单数", total_orders)
+        col2.metric("匹配订单数", matched_orders)
+        col3.metric("未匹配订单数", unmatched_orders)
+
+        
+        # 保存和下载按钮
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button('保存对账结果'):
+                if st.session_state.lz_compare_result is not None:
+                    # 生成文件名并保存文件
+                    st.session_state.lz_file_name = f'雅南PMS_OTA对账结果_{datetime.datetime.now().strftime("%Y%m%d%H%M%S")}.xlsx'
+                    st.session_state.lz_compare_result.to_excel(st.session_state.lz_file_name, index=False)
+                    st.session_state.lz_file_saved = True
+                    st.success('对账结果已保存')
+        
+        with col2:
+            if st.session_state.lz_file_saved and st.session_state.lz_file_name:
+                # 提供下载链接
+                with open(st.session_state.lz_file_name, 'rb') as f:
+                    st.download_button(
+                        label="下载雅南对账结果",
+                        data=f,
+                        file_name=st.session_state.lz_file_name,
+                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                   )
+
+
 # 侧边栏导航
 with st.sidebar:
-    selected_tab = st.radio("选择功能", ["格曼POS", "方格POS", "雅南OTA", "雅南POS", "兰兹POS"], on_change=reset_state)
+    selected_tab = st.radio("选择功能", ["格曼POS", "方格POS", "雅南OTA", "雅南POS", "兰兹POS", "兰兹OTA"], on_change=reset_state)
 
 # 主界面
 if selected_tab == "格曼POS":
@@ -904,5 +1136,11 @@ if selected_tab == "兰兹POS":
     st.title("本程序用于兰兹对账")
     st.divider()
     lz_hotel_pms_pos_check()
+    st.divider()
+    st.caption("© 2025 兰兹酒店对账系统 | 版本 1.0")
+if selected_tab == "兰兹OTA":
+    st.title("本程序用于兰兹对账")
+    st.divider()
+    lz_hotel_pms_ota_check()
     st.divider()
     st.caption("© 2025 兰兹酒店对账系统 | 版本 1.0")
