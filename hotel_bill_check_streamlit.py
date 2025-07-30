@@ -13,6 +13,8 @@ import pandas as pd
 import numpy as np
 import datetime
 import time
+import xlrd
+import openpyxx
 # import chardet
 
 # 设置页面配置
